@@ -1,0 +1,53 @@
+{
+  "_comment": "Shared Go<->Solidity EIP-712 parity vectors. Asserted by internal/core TestParity (Go) and contracts/test/Parity.t.sol (Solidity). Regenerate the Go-side hashes with: UPDATE_PARITY=1 go test ./internal/core -run TestParity -v",
+  "domain": {
+    "name": "AgentBet",
+    "version": "1",
+    "chainId": 84532,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+  },
+  "betTermsTypeHash": "0xa30b486636b88adeaad697a5d8c1692ca318d5f847b06f5b8cb72c872ce7607f",
+  "domainSeparator": "0x59525f23e04656b43a4368d34ba21c93f7d067e45028e5b24424daffe2a81c4c",
+  "vectors": [
+    {
+      "name": "btc-120k-with-arbiter",
+      "terms": {
+        "yesAgent": "0x1111111111111111111111111111111111111111",
+        "noAgent": "0x2222222222222222222222222222222222222222",
+        "collateralToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "yesStake": "500000000",
+        "noStake": "500000000",
+        "statement": "BTC-USD daily close on Coinbase will be above 120000 on 2026-07-01 UTC.",
+        "eventTime": 1782518400,
+        "claimDeadline": 1782604800,
+        "challengeWindow": 86400,
+        "primarySource": "Coinbase BTC-USD daily candle",
+        "fallbackSource": "Chainlink BTC/USD reference feed",
+        "arbiter": "0x3333333333333333333333333333333333333333",
+        "nonce": "1"
+      },
+      "termsHash": "0x1ad5225971c109eeee84a6d0890961c99bb9b74a25edf2d5aa6eaecf6ca19fec",
+      "digest": "0xe71c5ffa06e95c03215b2fe527716b513763ae72861adc1b06eccaa0da25243c"
+    },
+    {
+      "name": "eth-5k-no-arbiter",
+      "terms": {
+        "yesAgent": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "noAgent": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "collateralToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "yesStake": "250000000",
+        "noStake": "250000000",
+        "statement": "Will ETH be above $5,000 at 00:00 UTC on January 1, 2027?",
+        "eventTime": 1798761600,
+        "claimDeadline": 1798848000,
+        "challengeWindow": 43200,
+        "primarySource": "Coinbase ETH-USD spot price",
+        "fallbackSource": "Chainlink ETH/USD reference feed",
+        "arbiter": "0x0000000000000000000000000000000000000000",
+        "nonce": "42"
+      },
+      "termsHash": "0xb2736c801d75e42bd6ade19f5614fb55137e5839cf0b8dd51087afb4769b8bcd",
+      "digest": "0x0487d20ca63336e548b1dd2f3cc0ec7c9e457297e3ced3f28714cbc66bdf1582"
+    }
+  ]
+}
