@@ -329,6 +329,135 @@ contract BetEscrowTest is Test {
         ); // same agents
     }
 
+    // --- open bets (one side filled later via accept / cancelled via revoke) ---
+
+    function _deployOpen(address arbiter_) internal returns (BetEscrow e) {
+        // yes is the proposer; the NO side is open (address(0)).
+        e = new BetEscrow(
+            BetEscrow.Terms({
+                yesAgent: yes,
+                noAgent: address(0),
+                arbiter: arbiter_,
+                token: address(usdc),
+                yesStake: YES_STAKE,
+                noStake: NO_STAKE,
+                claimDeadline: claimDeadline,
+                challengeWindow: challengeWindow,
+                termsHash: keccak256("open"),
+                visibility: 1
+            }),
+            arbiter_ == address(0) ? 0 : BASE_FEE_BPS,
+            arbiter_ == address(0) ? 0 : EXEC_FEE,
+            revenue
+        );
+    }
+
+    function _fundProposer(BetEscrow e, uint256 amount) internal {
+        usdc.mint(yes, amount);
+        vm.prank(yes);
+        usdc.approve(address(e), amount);
+        vm.prank(yes);
+        e.fund();
+    }
+
+    function _accept(BetEscrow e, uint256 amount) internal {
+        usdc.mint(no, amount);
+        vm.prank(no);
+        usdc.approve(address(e), amount);
+        vm.prank(no);
+        e.accept();
+    }
+
+    function testOpenBetAcceptGoesLive() public {
+        BetEscrow e = _deployOpen(address(0));
+        _fundProposer(e, YES_STAKE);
+        assertEq(e.noAgent(), address(0));
+        assertEq(uint8(e.status()), uint8(BetEscrow.Status.Funding));
+
+        _accept(e, NO_STAKE);
+        assertEq(e.noAgent(), no);
+        assertTrue(e.noFunded());
+        assertEq(uint8(e.status()), uint8(BetEscrow.Status.Live));
+    }
+
+    function testOpenBetArbiteredAcceptDeposits() public {
+        BetEscrow e = _deployOpen(arb);
+        _fundProposer(e, YES_STAKE + EXEC_FEE);
+        _accept(e, NO_STAKE + EXEC_FEE);
+        assertEq(uint8(e.status()), uint8(BetEscrow.Status.Live));
+        assertEq(usdc.balanceOf(address(e)), YES_STAKE + NO_STAKE + 2 * EXEC_FEE);
+    }
+
+    function testRevokeRefundsProposer() public {
+        BetEscrow e = _deployOpen(address(0));
+        _fundProposer(e, YES_STAKE);
+        vm.prank(yes);
+        e.revoke();
+        assertEq(uint8(e.status()), uint8(BetEscrow.Status.Voided));
+        assertEq(usdc.balanceOf(yes), YES_STAKE); // refunded
+        assertEq(usdc.balanceOf(address(e)), 0);
+    }
+
+    function testAcceptRequiresProposerFunded() public {
+        BetEscrow e = _deployOpen(address(0)); // proposer not funded
+        usdc.mint(no, NO_STAKE);
+        vm.prank(no);
+        usdc.approve(address(e), NO_STAKE);
+        vm.prank(no);
+        vm.expectRevert(BetEscrow.NotFunding.selector);
+        e.accept();
+    }
+
+    function testCannotAcceptOwnOpenBet() public {
+        BetEscrow e = _deployOpen(address(0));
+        _fundProposer(e, YES_STAKE);
+        usdc.mint(yes, NO_STAKE);
+        vm.prank(yes);
+        usdc.approve(address(e), NO_STAKE);
+        vm.prank(yes);
+        vm.expectRevert(BetEscrow.NotParticipant.selector);
+        e.accept();
+    }
+
+    function testRevokeOnlyProposer() public {
+        BetEscrow e = _deployOpen(address(0));
+        _fundProposer(e, YES_STAKE);
+        vm.prank(stranger);
+        vm.expectRevert(BetEscrow.NotParticipant.selector);
+        e.revoke();
+    }
+
+    function testBilateralRejectsAcceptAndRevoke() public {
+        BetEscrow e = _deploy(YES_STAKE, NO_STAKE, arb);
+        vm.expectRevert(BetEscrow.NotOpen.selector);
+        e.accept();
+        vm.prank(yes);
+        vm.expectRevert(BetEscrow.NotOpen.selector);
+        e.revoke();
+    }
+
+    function testBothAgentsOpenReverts() public {
+        vm.expectRevert(BetEscrow.BadTerms.selector);
+        new BetEscrow(
+            BetEscrow.Terms(address(0), address(0), arb, address(usdc), 1, 1, claimDeadline, challengeWindow, bytes32(0), 0),
+            0,
+            0,
+            revenue
+        );
+    }
+
+    function testOpenBetResolvesAfterAccept() public {
+        BetEscrow e = _deployOpen(address(0));
+        _fundProposer(e, YES_STAKE);
+        _accept(e, NO_STAKE);
+        // a normal live bet now: both agree YES → proposer (yes) takes the pot
+        vm.prank(yes);
+        e.agreeOutcome(BetEscrow.Outcome.Yes);
+        vm.prank(no);
+        e.agreeOutcome(BetEscrow.Outcome.Yes);
+        assertEq(usdc.balanceOf(yes), YES_STAKE + NO_STAKE);
+    }
+
     // --- the non-negotiable invariant: funds conservation ---
 
     function testFuzz_FundsConservation(uint96 yesStake, uint96 noStake, uint8 outcomeSel) public {

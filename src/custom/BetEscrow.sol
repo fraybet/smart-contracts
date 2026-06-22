@@ -61,8 +61,12 @@ contract BetEscrow is ReentrancyGuard {
         uint8 visibility; // 0 = private, 1 = public (drives the website)
     }
 
-    address public immutable yesAgent;
-    address public immutable noAgent;
+    // Agents are storage (not immutable) so an OPEN bet — created with one side
+    // set to address(0) — can have that slot filled by the first taker who
+    // accept()s. A normal bilateral bet sets both at construction and they never
+    // change.
+    address public yesAgent;
+    address public noAgent;
     address public immutable arbiter;
     IERC20 public immutable token;
     uint256 public immutable yesStake;
@@ -94,6 +98,8 @@ contract BetEscrow is ReentrancyGuard {
     Outcome public noAgentAgreed;
 
     event Funded(address indexed agent);
+    event Accepted(address indexed taker); // open bet's counterparty filled
+    event Revoked(); // open bet cancelled by the proposer before acceptance
     event WentLive();
     event Claimed(address indexed by, Outcome outcome, bytes32 evidenceHash, uint64 challengeDeadline);
     event Challenged(address indexed by);
@@ -115,11 +121,16 @@ contract BetEscrow is ReentrancyGuard {
     error TooEarly();
     error AlreadySettled();
     error BadTerms();
+    error NotOpen();
 
     constructor(Terms memory t, uint256 baseFeeBps_, uint256 executionFee_, address revenueWallet_) {
+        // Open bet: exactly one side is address(0) (filled later by accept()).
+        // Bilateral bet: both set and distinct. Both-open is invalid.
+        bool openYes = t.yesAgent == address(0);
+        bool openNo = t.noAgent == address(0);
         if (
-            t.yesAgent == address(0) || t.noAgent == address(0) || t.token == address(0) || t.yesAgent == t.noAgent
-                || t.yesStake == 0 || t.noStake == 0 || t.challengeWindow == 0
+            (openYes && openNo) || t.token == address(0) || t.yesStake == 0 || t.noStake == 0
+                || t.challengeWindow == 0 || (!openYes && !openNo && t.yesAgent == t.noAgent)
         ) {
             revert BadTerms();
         }
@@ -166,6 +177,59 @@ contract BetEscrow is ReentrancyGuard {
             status = Status.Live;
             emit WentLive();
         }
+    }
+
+    /// @notice Take the open side of an OPEN bet. The proposer must already have
+    ///         funded their side (their committed stake is what makes the open
+    ///         bet credible). The taker fills the empty slot, escrows the
+    ///         counterparty stake (+ execution-fee deposit if arbitered), and the
+    ///         bet goes Live in the same call.
+    function accept() external nonReentrant {
+        if (status != Status.Funding) revert NotFunding();
+        bool openYes = yesAgent == address(0);
+        bool openNo = noAgent == address(0);
+        if (!openYes && !openNo) revert NotOpen();
+        address proposer = openYes ? noAgent : yesAgent;
+        if (msg.sender == proposer) revert NotParticipant(); // can't take your own bet
+        // The proposer must be committed (funded) before anyone can accept.
+        if (openYes ? !noFunded : !yesFunded) revert NotFunding();
+
+        uint256 deposit = arbiter != address(0) ? executionFee : 0;
+        if (openYes) {
+            yesAgent = msg.sender;
+            yesFunded = true;
+            token.safeTransferFrom(msg.sender, address(this), yesStake + deposit);
+        } else {
+            noAgent = msg.sender;
+            noFunded = true;
+            token.safeTransferFrom(msg.sender, address(this), noStake + deposit);
+        }
+        emit Accepted(msg.sender);
+        emit Funded(msg.sender);
+        status = Status.Live;
+        emit WentLive();
+    }
+
+    /// @notice Cancel an OPEN bet that has not been accepted, refunding the
+    ///         proposer's escrowed stake. Only the proposer may revoke.
+    function revoke() external nonReentrant {
+        if (status != Status.Funding) revert NotFunding();
+        bool openYes = yesAgent == address(0);
+        bool openNo = noAgent == address(0);
+        if (!openYes && !openNo) revert NotOpen();
+        address proposer = openYes ? noAgent : yesAgent;
+        if (msg.sender != proposer) revert NotParticipant();
+
+        status = Status.Voided;
+        settled = true; // no further settlement
+        uint256 deposit = arbiter != address(0) ? executionFee : 0;
+        if (openYes) {
+            if (noFunded) token.safeTransfer(noAgent, noStake + deposit);
+        } else {
+            if (yesFunded) token.safeTransfer(yesAgent, yesStake + deposit);
+        }
+        emit Revoked();
+        emit Settled(Outcome.Void);
     }
 
     /// @notice Claim an outcome (YES or NO) once Live. Opens the challenge window.
