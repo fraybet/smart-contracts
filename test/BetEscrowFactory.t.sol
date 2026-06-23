@@ -6,6 +6,7 @@ import {BetEscrow} from "../src/custom/BetEscrow.sol";
 import {BetEscrowFactory} from "../src/custom/BetEscrowFactory.sol";
 import {StablecoinAllowlist} from "../src/custom/StablecoinAllowlist.sol";
 import {EmergencyPauseController} from "../src/custom/EmergencyPauseController.sol";
+import {EIP712Terms} from "../src/custom/EIP712Terms.sol";
 import {MockUSDC} from "./BetEscrow.t.sol";
 
 contract BetEscrowFactoryTest is Test {
@@ -57,23 +58,50 @@ contract BetEscrowFactoryTest is Test {
             token: address(usdc),
             yesStake: 500e6,
             noStake: 500e6,
+            eventTime: uint64(block.timestamp + 12 hours),
             claimDeadline: uint64(block.timestamp + 1 days),
             challengeWindow: 1 hours,
-            termsHash: keccak256("t"),
+            nonce: 0,
+            statement: "Will it rain in NYC on 2026-07-01?",
+            primarySource: "weather.gov",
+            fallbackSource: "",
             visibility: 1
         });
+    }
+
+    // The termsHash the escrow derives on-chain from _terms().
+    function _expectedHash() internal view returns (bytes32) {
+        BetEscrow.Terms memory t = _terms();
+        return EIP712Terms.structHash(
+            EIP712Terms.BetTerms({
+                yesAgent: t.yesAgent,
+                noAgent: t.noAgent,
+                collateralToken: t.token,
+                yesStake: t.yesStake,
+                noStake: t.noStake,
+                statement: t.statement,
+                eventTime: t.eventTime,
+                claimDeadline: t.claimDeadline,
+                challengeWindow: t.challengeWindow,
+                primarySource: t.primarySource,
+                fallbackSource: t.fallbackSource,
+                arbiter: t.arbiter,
+                nonce: t.nonce
+            })
+        );
     }
 
     function testCreateEmitsAndDeploys() public {
         // Escrow address isn't known ahead of time → skip matching topic1.
         vm.expectEmit(false, true, true, true);
-        emit BetCreated(address(0), yes, no, keccak256("t"), 1);
+        emit BetCreated(address(0), yes, no, _expectedHash(), 1);
         address escrow = factory.create(_terms());
 
         BetEscrow e = BetEscrow(escrow);
         assertEq(e.yesAgent(), yes);
         assertEq(e.noAgent(), no);
-        assertEq(e.termsHash(), keccak256("t"));
+        assertEq(e.termsHash(), _expectedHash());
+        assertEq(e.statement(), "Will it rain in NYC on 2026-07-01?");
         assertEq(e.visibility(), 1);
         assertEq(uint8(e.status()), uint8(BetEscrow.Status.Funding));
     }

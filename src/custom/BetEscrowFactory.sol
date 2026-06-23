@@ -79,6 +79,7 @@ contract BetEscrowFactory {
         }
         BetEscrow e = new BetEscrow(terms, baseFeeBps, executionFee, revenueWallet);
         escrow = address(e);
-        emit BetCreated(escrow, terms.yesAgent, terms.noAgent, terms.termsHash, terms.visibility);
+        // termsHash is derived inside the escrow from the descriptive terms.
+        emit BetCreated(escrow, terms.yesAgent, terms.noAgent, e.termsHash(), terms.visibility);
     }
 }

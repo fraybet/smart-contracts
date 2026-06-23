@@ -52,8 +52,12 @@ contract BetEscrowTest is Test {
                 yesStake: yesStake,
                 noStake: noStake,
                 claimDeadline: claimDeadline,
+                eventTime: uint64(block.timestamp),
                 challengeWindow: challengeWindow,
-                termsHash: keccak256("terms"),
+                nonce: 0,
+                statement: "Will BTC close above 100000 USD on 2026-12-31?",
+                primarySource: "Coinbase BTC-USD",
+                fallbackSource: "",
                 visibility: 1
             }),
             0,
@@ -80,8 +84,12 @@ contract BetEscrowTest is Test {
                 yesStake: YES_STAKE,
                 noStake: NO_STAKE,
                 claimDeadline: claimDeadline,
+                eventTime: uint64(block.timestamp),
                 challengeWindow: challengeWindow,
-                termsHash: keccak256("terms"),
+                nonce: 0,
+                statement: "Will BTC close above 100000 USD on 2026-12-31?",
+                primarySource: "Coinbase BTC-USD",
+                fallbackSource: "",
                 visibility: 1
             }),
             BASE_FEE_BPS,
@@ -217,6 +225,30 @@ contract BetEscrowTest is Test {
         assertEq(usdc.balanceOf(address(e)), 0);
     }
 
+    function testFeeDisputedVoidSplitsFeesEqually() public {
+        // Arbiter rules a contested bet VOID (e.g. nonsensical). It still did the
+        // work, so base fee + execution fee are charged, split equally; the rest
+        // is refunded. No loser eats the whole deposit.
+        BetEscrow e = _deployFeesFunded();
+        vm.prank(yes);
+        e.claim(BetEscrow.Outcome.Yes, bytes32(0));
+        vm.prank(no);
+        e.challenge();
+        vm.prank(arb);
+        e.resolve(BetEscrow.Outcome.Void, bytes32(0));
+
+        uint256 pot = YES_STAKE + NO_STAKE;
+        uint256 baseFee = pot * BASE_FEE_BPS / 10_000;
+        uint256 totalFee = baseFee + EXEC_FEE;
+        uint256 yesShare = totalFee / 2;
+        uint256 noShare = totalFee - yesShare;
+        assertEq(usdc.balanceOf(revenue), baseFee, "base fee to revenue");
+        assertEq(usdc.balanceOf(arb), EXEC_FEE, "arbiter paid for the ruling");
+        assertEq(usdc.balanceOf(yes), YES_STAKE + EXEC_FEE - yesShare, "yes refunded minus its half of fees");
+        assertEq(usdc.balanceOf(no), NO_STAKE + EXEC_FEE - noShare, "no refunded minus its half of fees");
+        assertEq(usdc.balanceOf(address(e)), 0, "escrow fully drained");
+    }
+
     function testFeeVoidRefundsEverything() public {
         BetEscrow e = _deployFeesFunded();
         vm.warp(claimDeadline + 1);
@@ -325,7 +357,12 @@ contract BetEscrowTest is Test {
     function testBadTermsRevert() public {
         vm.expectRevert(BetEscrow.BadTerms.selector);
         new BetEscrow(
-            BetEscrow.Terms(yes, yes, arb, address(usdc), 1, 1, claimDeadline, challengeWindow, bytes32(0), 0), 0, 0, revenue
+            BetEscrow.Terms(
+                yes, yes, arb, address(usdc), 1, 1, uint64(block.timestamp), claimDeadline, challengeWindow, 0, "x", "s", "", 0
+            ),
+            0,
+            0,
+            revenue
         ); // same agents
     }
 
@@ -341,9 +378,13 @@ contract BetEscrowTest is Test {
                 token: address(usdc),
                 yesStake: YES_STAKE,
                 noStake: NO_STAKE,
+                eventTime: uint64(block.timestamp),
                 claimDeadline: claimDeadline,
                 challengeWindow: challengeWindow,
-                termsHash: keccak256("open"),
+                nonce: 0,
+                statement: "Open bet statement",
+                primarySource: "src",
+                fallbackSource: "",
                 visibility: 1
             }),
             arbiter_ == address(0) ? 0 : BASE_FEE_BPS,
@@ -439,7 +480,22 @@ contract BetEscrowTest is Test {
     function testBothAgentsOpenReverts() public {
         vm.expectRevert(BetEscrow.BadTerms.selector);
         new BetEscrow(
-            BetEscrow.Terms(address(0), address(0), arb, address(usdc), 1, 1, claimDeadline, challengeWindow, bytes32(0), 0),
+            BetEscrow.Terms(
+                address(0),
+                address(0),
+                arb,
+                address(usdc),
+                1,
+                1,
+                uint64(block.timestamp),
+                claimDeadline,
+                challengeWindow,
+                0,
+                "x",
+                "s",
+                "",
+                0
+            ),
             0,
             0,
             revenue

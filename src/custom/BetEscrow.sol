@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {EIP712Terms} from "./EIP712Terms.sol";
 
 /// @title BetEscrow
 /// @notice Non-custodial bilateral binary bet (design §9). Two agents stake an
@@ -47,7 +48,12 @@ contract BetEscrow is ReentrancyGuard {
         Void
     }
 
-    /// @dev Constructor params, grouped to avoid stack-too-deep.
+    /// @dev Constructor params, grouped to avoid stack-too-deep. Carries the full
+    ///      descriptive terms (statement + sources + event time + nonce) so the
+    ///      escrow can store them on-chain AND derive termsHash from them — the
+    ///      stored terms and the canonical hash can never disagree. An arbiter
+    ///      reads the agreed bet straight from contract storage; no off-chain
+    ///      preimage to lose or dispute.
     struct Terms {
         address yesAgent;
         address noAgent;
@@ -55,9 +61,13 @@ contract BetEscrow is ReentrancyGuard {
         address token;
         uint256 yesStake;
         uint256 noStake;
+        uint64 eventTime; // when the real-world event resolves
         uint64 claimDeadline;
         uint64 challengeWindow;
-        bytes32 termsHash;
+        uint256 nonce; // disambiguates otherwise-identical terms
+        string statement; // the human-readable bet
+        string primarySource; // canonical resolution source
+        string fallbackSource; // secondary source (may be empty)
         uint8 visibility; // 0 = private, 1 = public (drives the website)
     }
 
@@ -71,10 +81,19 @@ contract BetEscrow is ReentrancyGuard {
     IERC20 public immutable token;
     uint256 public immutable yesStake;
     uint256 public immutable noStake;
+    uint64 public immutable eventTime;
     uint64 public immutable claimDeadline;
     uint64 public immutable challengeWindow;
-    bytes32 public immutable termsHash;
+    uint256 public immutable nonce;
+    bytes32 public immutable termsHash; // derived on-chain from the terms below
     uint8 public immutable visibility;
+
+    // Descriptive terms, kept in storage so an arbiter (and anyone) reads the
+    // exact agreed bet on-chain. termsHash is computed from these, so they are
+    // provably the committed terms — not an unverified off-chain copy.
+    string public statement;
+    string public primarySource;
+    string public fallbackSource;
 
     // Protocol arbitration fees — set by the factory, charged ONLY on arbitered
     // bets (arbiter != 0). baseFee is a % of the pot → revenueWallet; executionFee
@@ -145,10 +164,35 @@ contract BetEscrow is ReentrancyGuard {
         token = IERC20(t.token);
         yesStake = t.yesStake;
         noStake = t.noStake;
+        eventTime = t.eventTime;
         claimDeadline = t.claimDeadline;
         challengeWindow = t.challengeWindow;
-        termsHash = t.termsHash;
+        nonce = t.nonce;
+        statement = t.statement;
+        primarySource = t.primarySource;
+        fallbackSource = t.fallbackSource;
         visibility = t.visibility;
+        // Derive the canonical termsHash from the stored terms (EIP-712). Because
+        // it is computed here, not supplied, the on-chain statement/sources are
+        // guaranteed to be exactly what the hash commits to — open side included
+        // (the open agent is address(0) at creation, matching the off-chain hash).
+        termsHash = EIP712Terms.structHash(
+            EIP712Terms.BetTerms({
+                yesAgent: t.yesAgent,
+                noAgent: t.noAgent,
+                collateralToken: t.token,
+                yesStake: t.yesStake,
+                noStake: t.noStake,
+                statement: t.statement,
+                eventTime: t.eventTime,
+                claimDeadline: t.claimDeadline,
+                challengeWindow: t.challengeWindow,
+                primarySource: t.primarySource,
+                fallbackSource: t.fallbackSource,
+                arbiter: t.arbiter,
+                nonce: t.nonce
+            })
+        );
         baseFeeBps = baseFeeBps_;
         executionFee = executionFee_;
         revenueWallet = revenueWallet_;
@@ -318,9 +362,29 @@ contract BetEscrow is ReentrancyGuard {
         bool arb = arbiter != address(0);
 
         if (finalOutcome == Outcome.Void) {
-            // Refund stakes + any execution-fee deposits; no fees are taken.
-            if (yesFunded) token.safeTransfer(yesAgent, yesStake + (arb ? executionFee : 0));
-            if (noFunded) token.safeTransfer(noAgent, noStake + (arb ? executionFee : 0));
+            // Undisputed void (mutual agreeOutcome / unclaimed-timeout): no arbiter
+            // did any work, so refund stakes + any execution-fee deposits in full.
+            if (!(arb && disputed)) {
+                if (yesFunded) token.safeTransfer(yesAgent, yesStake + (arb ? executionFee : 0));
+                if (noFunded) token.safeTransfer(noAgent, noStake + (arb ? executionFee : 0));
+                emit Settled(finalOutcome);
+                return;
+            }
+            // Arbiter adjudicated the bet VOID (e.g. nonsensical / unresolvable).
+            // It still did the work, so the protocol base fee AND the arbiter's
+            // execution fee are charged — split EQUALLY between the two sides,
+            // since a void has no loser. Each side is refunded the remainder. A
+            // disputed void is only reachable from Contested, so both sides funded
+            // and the pot is fully collateralized (yesFunded && noFunded).
+            uint256 pot = yesStake + noStake;
+            uint256 baseFee = pot * baseFeeBps / BPS;
+            uint256 totalFee = baseFee + executionFee; // base → revenue, exec → arbiter
+            uint256 yesShare = totalFee / 2;
+            uint256 noShare = totalFee - yesShare; // NO absorbs any odd-wei remainder
+            if (baseFee > 0) token.safeTransfer(revenueWallet, baseFee);
+            if (executionFee > 0) token.safeTransfer(arbiter, executionFee);
+            token.safeTransfer(yesAgent, yesStake + executionFee - yesShare);
+            token.safeTransfer(noAgent, noStake + executionFee - noShare);
             emit Settled(finalOutcome);
             return;
         }

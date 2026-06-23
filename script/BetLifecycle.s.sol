@@ -46,9 +46,13 @@ contract BetLifecycle is Script {
             token: address(usdc),
             yesStake: stake,
             noStake: stake,
+            eventTime: uint64(block.timestamp + 12 hours),
             claimDeadline: uint64(block.timestamp + 1 days),
             challengeWindow: 1 hours,
-            termsHash: keccak256("ETH above 5000 on 2027-01-01"),
+            nonce: 0,
+            statement: "Will ETH close above 5000 USD on 2027-01-01?",
+            primarySource: "Coinbase ETH-USD",
+            fallbackSource: "",
             visibility: 1
         });
         BetEscrow escrow = BetEscrow(factory.create(terms));
