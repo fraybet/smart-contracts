@@ -6,6 +6,16 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EIP712Terms} from "./EIP712Terms.sol";
 
+/// @notice The bond-funded arbitration interface the escrow needs from the
+///         AgentRegistry: read the fee, reserve an open-bet taker's bond, and at
+///         settlement release or charge a participant's reserved bond.
+interface IBondRegistry {
+    function arbitrationFee() external view returns (uint256);
+    function reserveTaker(address taker) external;
+    function release(address wallet) external;
+    function charge(address wallet, address to, uint256 amount) external;
+}
+
 /// @title BetEscrow
 /// @notice Non-custodial bilateral binary bet (design §9). Two agents stake an
 ///         ERC-20 (USDC) into this contract; it pays the winner, refunds on
@@ -95,13 +105,15 @@ contract BetEscrow is ReentrancyGuard {
     string public primarySource;
     string public fallbackSource;
 
-    // Protocol arbitration fees — set by the factory, charged ONLY on arbitered
-    // bets (arbiter != 0). baseFee is a % of the pot → revenueWallet; executionFee
-    // is a fixed per-side deposit, the loser's of which pays the arbiter when a
-    // dispute is actually arbitrated (otherwise both deposits are refunded).
+    // Protocol fees — applied ONLY to arbitered bets (arbiter != 0). baseFee is a
+    // % of the pot → revenueWallet, taken at settlement. Arbitration itself is paid
+    // from the participants' registration BONDS (not a per-bet deposit): the
+    // registry reserves a slice of each side's bond at entry and, on a disputed
+    // resolution, the arbiter is charged the loser's (or, on a void, both sides')
+    // reserved bond. So an arbitered bet escrows only stake here.
     uint256 public immutable baseFeeBps;
-    uint256 public immutable executionFee;
     address public immutable revenueWallet;
+    IBondRegistry public immutable registry; // bond-funded arbitration source
 
     Status public status;
     Outcome public claimedOutcome;
@@ -142,7 +154,7 @@ contract BetEscrow is ReentrancyGuard {
     error BadTerms();
     error NotOpen();
 
-    constructor(Terms memory t, uint256 baseFeeBps_, uint256 executionFee_, address revenueWallet_) {
+    constructor(Terms memory t, uint256 baseFeeBps_, address revenueWallet_, address registry_) {
         // Open bet: exactly one side is address(0) (filled later by accept()).
         // Bilateral bet: both set and distinct. Both-open is invalid.
         bool openYes = t.yesAgent == address(0);
@@ -153,9 +165,11 @@ contract BetEscrow is ReentrancyGuard {
         ) {
             revert BadTerms();
         }
-        // Fees apply only to arbitered bets; if charged, a revenue wallet is required.
-        if (t.arbiter != address(0) && (baseFeeBps_ > 0 || executionFee_ > 0) && revenueWallet_ == address(0)) {
-            revert BadTerms();
+        // Arbitered bets need a revenue wallet (base fee) and a bond registry
+        // (arbitration is paid from bonds). Non-arbitered bets need neither.
+        if (t.arbiter != address(0)) {
+            if (baseFeeBps_ > 0 && revenueWallet_ == address(0)) revert BadTerms();
+            if (registry_ == address(0)) revert BadTerms();
         }
         if (baseFeeBps_ > BPS) revert BadTerms();
         yesAgent = t.yesAgent;
@@ -194,8 +208,8 @@ contract BetEscrow is ReentrancyGuard {
             })
         );
         baseFeeBps = baseFeeBps_;
-        executionFee = executionFee_;
         revenueWallet = revenueWallet_;
+        registry = IBondRegistry(registry_);
         status = Status.Funding;
     }
 
@@ -203,16 +217,15 @@ contract BetEscrow is ReentrancyGuard {
     ///         have funded, the bet goes Live.
     function fund() external nonReentrant {
         if (status != Status.Funding) revert NotFunding();
-        // Arbitered bets also escrow a refundable execution-fee deposit per side.
-        uint256 deposit = arbiter != address(0) ? executionFee : 0;
+        // Stake only — arbitration is bonded at the registry, not deposited here.
         if (msg.sender == yesAgent) {
             if (yesFunded) revert AlreadyFunded();
             yesFunded = true;
-            token.safeTransferFrom(msg.sender, address(this), yesStake + deposit);
+            token.safeTransferFrom(msg.sender, address(this), yesStake);
         } else if (msg.sender == noAgent) {
             if (noFunded) revert AlreadyFunded();
             noFunded = true;
-            token.safeTransferFrom(msg.sender, address(this), noStake + deposit);
+            token.safeTransferFrom(msg.sender, address(this), noStake);
         } else {
             revert NotParticipant();
         }
@@ -226,8 +239,9 @@ contract BetEscrow is ReentrancyGuard {
     /// @notice Take the open side of an OPEN bet. The proposer must already have
     ///         funded their side (their committed stake is what makes the open
     ///         bet credible). The taker fills the empty slot, escrows the
-    ///         counterparty stake (+ execution-fee deposit if arbitered), and the
-    ///         bet goes Live in the same call.
+    ///         counterparty stake, and the bet goes Live in the same call. On an
+    ///         arbitered bet the taker's bond is reserved at the registry (which
+    ///         requires the taker to be a registered agent with free bond).
     function accept() external nonReentrant {
         if (status != Status.Funding) revert NotFunding();
         bool openYes = yesAgent == address(0);
@@ -238,16 +252,16 @@ contract BetEscrow is ReentrancyGuard {
         // The proposer must be committed (funded) before anyone can accept.
         if (openYes ? !noFunded : !yesFunded) revert NotFunding();
 
-        uint256 deposit = arbiter != address(0) ? executionFee : 0;
         if (openYes) {
             yesAgent = msg.sender;
             yesFunded = true;
-            token.safeTransferFrom(msg.sender, address(this), yesStake + deposit);
+            token.safeTransferFrom(msg.sender, address(this), yesStake);
         } else {
             noAgent = msg.sender;
             noFunded = true;
-            token.safeTransferFrom(msg.sender, address(this), noStake + deposit);
+            token.safeTransferFrom(msg.sender, address(this), noStake);
         }
+        if (arbiter != address(0)) registry.reserveTaker(msg.sender);
         emit Accepted(msg.sender);
         emit Funded(msg.sender);
         status = Status.Live;
@@ -266,11 +280,13 @@ contract BetEscrow is ReentrancyGuard {
 
         status = Status.Voided;
         settled = true; // no further settlement
-        uint256 deposit = arbiter != address(0) ? executionFee : 0;
+        // Release the proposer's reserved bond and refund their stake. The open
+        // side was never accepted, so it neither funded nor reserved.
+        if (arbiter != address(0)) registry.release(proposer);
         if (openYes) {
-            if (noFunded) token.safeTransfer(noAgent, noStake + deposit);
+            if (noFunded) token.safeTransfer(noAgent, noStake);
         } else {
-            if (yesFunded) token.safeTransfer(yesAgent, yesStake + deposit);
+            if (yesFunded) token.safeTransfer(yesAgent, yesStake);
         }
         emit Revoked();
         emit Settled(Outcome.Void);
@@ -355,59 +371,66 @@ contract BetEscrow is ReentrancyGuard {
 
     /// @dev Pays out exactly the funded amount. YES/NO are only reachable after
     ///      both sides funded (Live), so the pot is fully collateralized; VOID
-    ///      refunds only what each side actually funded.
+    ///      refunds only what each side actually funded. Arbitration is paid from
+    ///      the participants' bonds via the registry (only on a *disputed*
+    ///      resolution); the per-bet bond reservations are released here too.
     function _settle() internal {
         if (settled) revert AlreadySettled();
         settled = true;
         bool arb = arbiter != address(0);
 
         if (finalOutcome == Outcome.Void) {
-            // Undisputed void (mutual agreeOutcome / unclaimed-timeout): no arbiter
-            // did any work, so refund stakes + any execution-fee deposits in full.
             if (!(arb && disputed)) {
-                if (yesFunded) token.safeTransfer(yesAgent, yesStake + (arb ? executionFee : 0));
-                if (noFunded) token.safeTransfer(noAgent, noStake + (arb ? executionFee : 0));
+                // Undisputed void (mutual agreeOutcome / unclaimed timeout): no
+                // arbiter did any work. Refund stakes; release both reservations.
+                if (yesFunded) token.safeTransfer(yesAgent, yesStake);
+                if (noFunded) token.safeTransfer(noAgent, noStake);
+                if (arb) {
+                    if (yesAgent != address(0)) registry.release(yesAgent);
+                    if (noAgent != address(0)) registry.release(noAgent);
+                }
                 emit Settled(finalOutcome);
                 return;
             }
             // Arbiter adjudicated the bet VOID (e.g. nonsensical / unresolvable).
-            // It still did the work, so the protocol base fee AND the arbiter's
-            // execution fee are charged — split EQUALLY between the two sides,
-            // since a void has no loser. Each side is refunded the remainder. A
-            // disputed void is only reachable from Contested, so both sides funded
-            // and the pot is fully collateralized (yesFunded && noFunded).
+            // It still did the work, so the base fee (from the pot) AND the
+            // arbitration fee (from bonds) are charged, each split EQUALLY between
+            // the two sides — a void has no loser. A disputed void is only
+            // reachable from Contested, so both sides funded.
             uint256 pot = yesStake + noStake;
             uint256 baseFee = pot * baseFeeBps / BPS;
-            uint256 totalFee = baseFee + executionFee; // base → revenue, exec → arbiter
-            uint256 yesShare = totalFee / 2;
-            uint256 noShare = totalFee - yesShare; // NO absorbs any odd-wei remainder
+            uint256 yesBase = baseFee / 2;
+            uint256 noBase = baseFee - yesBase; // NO absorbs any odd-wei remainder
             if (baseFee > 0) token.safeTransfer(revenueWallet, baseFee);
-            if (executionFee > 0) token.safeTransfer(arbiter, executionFee);
-            token.safeTransfer(yesAgent, yesStake + executionFee - yesShare);
-            token.safeTransfer(noAgent, noStake + executionFee - noShare);
+            token.safeTransfer(yesAgent, yesStake - yesBase);
+            token.safeTransfer(noAgent, noStake - noBase);
+            uint256 fee = registry.arbitrationFee();
+            uint256 halfFee = fee / 2;
+            registry.charge(yesAgent, arbiter, halfFee);
+            registry.charge(noAgent, arbiter, fee - halfFee);
             emit Settled(finalOutcome);
             return;
         }
 
         // YES/NO are only reachable after both sides funded (Live).
-        uint256 pot = yesStake + noStake;
+        uint256 pot2 = yesStake + noStake;
         address winner = finalOutcome == Outcome.Yes ? yesAgent : noAgent;
         address loser = finalOutcome == Outcome.Yes ? noAgent : yesAgent;
 
-        uint256 baseFee = arb ? pot * baseFeeBps / BPS : 0;
-        if (baseFee > 0) token.safeTransfer(revenueWallet, baseFee);
-        token.safeTransfer(winner, pot - baseFee);
+        uint256 base = arb ? pot2 * baseFeeBps / BPS : 0;
+        if (base > 0) token.safeTransfer(revenueWallet, base);
+        token.safeTransfer(winner, pot2 - base);
 
-        if (arb && executionFee > 0) {
+        if (arb) {
             if (disputed) {
-                // Arbitration was executed: the loser's deposit pays the arbiter,
-                // the winner's deposit is refunded.
-                token.safeTransfer(arbiter, executionFee);
-                token.safeTransfer(winner, executionFee);
+                // Arbitration executed: the loser's bond pays the arbiter; the
+                // winner's reservation is released untouched.
+                registry.charge(loser, arbiter, registry.arbitrationFee());
+                registry.release(winner);
             } else {
-                // No arbitration happened — refund both deposits.
-                token.safeTransfer(winner, executionFee);
-                token.safeTransfer(loser, executionFee);
+                // No arbitration happened — release both reservations, charge none.
+                registry.release(winner);
+                registry.release(loser);
             }
         }
         emit Settled(finalOutcome);

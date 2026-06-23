@@ -25,11 +25,11 @@ contract BetLifecycle is Script {
         StablecoinAllowlist allowlist = new StablecoinAllowlist(owner);
         vm.prank(owner);
         allowlist.allow(address(usdc));
-        BetEscrowFactory factory = new BetEscrowFactory(address(allowlist), address(pause), owner, 0, 0, address(0));
+        BetEscrowFactory factory = new BetEscrowFactory(address(allowlist), address(pause), owner, 0, address(0));
 
         address alice = vm.addr(1); // YES
         address bob = vm.addr(2); // NO
-        address arbiter = vm.addr(3);
+        address arbiter = address(0); // happy-path demo: no dispute, so no arbiter/bond registry
         uint256 stake = 500e6; // 500 USDC each
         usdc.mint(alice, stake);
         usdc.mint(bob, stake);

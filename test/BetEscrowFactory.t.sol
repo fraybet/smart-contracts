@@ -21,7 +21,7 @@ contract BetEscrowFactoryTest is Test {
     );
 
     function setUp() public {
-        factory = new BetEscrowFactory(address(0), address(0), address(0xBEEF), 0, 0, address(0)); // controls disabled
+        factory = new BetEscrowFactory(address(0), address(0), address(0xBEEF), 0, address(0)); // controls disabled
         usdc = new MockUSDC();
         yes = makeAddr("yes");
         no = makeAddr("no");
@@ -30,7 +30,7 @@ contract BetEscrowFactoryTest is Test {
 
     function testRejectsWhenPaused() public {
         EmergencyPauseController p = new EmergencyPauseController(address(this));
-        BetEscrowFactory f = new BetEscrowFactory(address(0), address(p), address(0xBEEF), 0, 0, address(0));
+        BetEscrowFactory f = new BetEscrowFactory(address(0), address(p), address(0xBEEF), 0, address(0));
         p.pause();
         vm.expectRevert(BetEscrowFactory.ProtocolPaused.selector);
         f.create(_terms());
@@ -38,7 +38,7 @@ contract BetEscrowFactoryTest is Test {
 
     function testRejectsNonAllowlistedToken() public {
         StablecoinAllowlist a = new StablecoinAllowlist(address(this)); // usdc not allowed
-        BetEscrowFactory f = new BetEscrowFactory(address(a), address(0), address(0xBEEF), 0, 0, address(0));
+        BetEscrowFactory f = new BetEscrowFactory(address(a), address(0), address(0xBEEF), 0, address(0));
         vm.expectRevert(BetEscrowFactory.TokenNotAllowed.selector);
         f.create(_terms());
     }
@@ -46,15 +46,17 @@ contract BetEscrowFactoryTest is Test {
     function testAllowlistedTokenCreates() public {
         StablecoinAllowlist a = new StablecoinAllowlist(address(this));
         a.allow(address(usdc));
-        BetEscrowFactory f = new BetEscrowFactory(address(a), address(0), address(0xBEEF), 0, 0, address(0));
+        BetEscrowFactory f = new BetEscrowFactory(address(a), address(0), address(0xBEEF), 0, address(0));
         assertTrue(f.create(_terms()) != address(0));
     }
 
     function _terms() internal view returns (BetEscrow.Terms memory) {
+        // Non-arbitered by default (so factory tests don't all need a bond
+        // registry); arbitered-path tests set the arbiter + a registry explicitly.
         return BetEscrow.Terms({
             yesAgent: yes,
             noAgent: no,
-            arbiter: arb,
+            arbiter: address(0),
             token: address(usdc),
             yesStake: 500e6,
             noStake: 500e6,
@@ -131,7 +133,7 @@ contract BetEscrowFactoryTest is Test {
     // --- registration gating (public / arbitered require an active agent) ---
 
     function _gatedFactory(MockRegistry r) internal returns (BetEscrowFactory) {
-        return new BetEscrowFactory(address(0), address(0), address(0xBEEF), 0, 0, address(r));
+        return new BetEscrowFactory(address(0), address(0), address(0xBEEF), 0, address(r));
     }
 
     function testPublicBetRequiresRegistration() public {
@@ -152,9 +154,36 @@ contract BetEscrowFactoryTest is Test {
         MockRegistry r = new MockRegistry();
         BetEscrowFactory f = _gatedFactory(r);
         BetEscrow.Terms memory t = _terms();
-        t.visibility = 0; // private, but arbiter still set → gated
+        t.visibility = 0; // private
+        t.arbiter = arb; // ...but arbitered → gated
         vm.expectRevert(BetEscrowFactory.NotRegistered.selector);
         f.create(t);
+    }
+
+    function testArbiteredBetRequiresBothAgentsRegistered() public {
+        MockRegistry r = new MockRegistry();
+        r.setActive(address(this), true); // creator registered
+        BetEscrowFactory f = _gatedFactory(r);
+        BetEscrow.Terms memory t = _terms();
+        t.arbiter = arb; // both yes and no must be active too
+        vm.expectRevert(BetEscrowFactory.NotRegistered.selector);
+        f.create(t); // yes/no not active → revert
+    }
+
+    function testArbiteredBetOnboardsEscrow() public {
+        MockRegistry r = new MockRegistry();
+        r.setActive(address(this), true);
+        r.setActive(yes, true);
+        r.setActive(no, true);
+        BetEscrowFactory f = _gatedFactory(r);
+        BetEscrow.Terms memory t = _terms();
+        t.arbiter = arb;
+        address escrow = f.create(t);
+        assertTrue(escrow != address(0));
+        // The factory onboarded the escrow and reserved each participant's bond.
+        assertTrue(r.onboarded(escrow), "escrow authorized at the registry");
+        assertEq(r.reservedOf(yes), 1, "yes bond reserved");
+        assertEq(r.reservedOf(no), 1, "no bond reserved");
     }
 
     function testPrivateUnarbiteredIsPermissionless() public {
@@ -167,9 +196,11 @@ contract BetEscrowFactoryTest is Test {
     }
 }
 
-/// @dev Minimal AgentRegistry stand-in for gating tests.
+/// @dev Minimal AgentRegistry stand-in for gating + onboarding tests.
 contract MockRegistry {
     mapping(address => bool) public active;
+    mapping(address => bool) public onboarded; // escrows authorized via onArbiteredBet
+    mapping(address => uint256) public reservedOf;
 
     function setActive(address a, bool v) external {
         active[a] = v;
@@ -177,5 +208,11 @@ contract MockRegistry {
 
     function isActive(address a) external view returns (bool) {
         return active[a];
+    }
+
+    function onArbiteredBet(address escrow, address yesAgent, address noAgent) external {
+        onboarded[escrow] = true;
+        if (yesAgent != address(0)) reservedOf[yesAgent] += 1;
+        if (noAgent != address(0)) reservedOf[noAgent] += 1;
     }
 }

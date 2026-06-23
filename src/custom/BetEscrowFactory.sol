@@ -5,9 +5,12 @@ import {BetEscrow} from "./BetEscrow.sol";
 import {StablecoinAllowlist} from "./StablecoinAllowlist.sol";
 import {EmergencyPauseController} from "./EmergencyPauseController.sol";
 
-/// @notice Minimal view into the AgentRegistry used to gate public/arbitered bets.
+/// @notice The slice of the AgentRegistry the factory needs: gate public/arbitered
+///         bets on registration, and onboard a new arbitered escrow (authorize it
+///         + reserve each participant's bond).
 interface IAgentRegistry {
     function isActive(address wallet) external view returns (bool);
+    function onArbiteredBet(address escrow, address yesAgent, address noAgent) external;
 }
 
 /// @title BetEscrowFactory
@@ -32,10 +35,10 @@ contract BetEscrowFactory {
     EmergencyPauseController public immutable pauseController;
     IAgentRegistry public immutable registry;
 
-    // Protocol arbitration fees, applied by each escrow to arbitered bets only.
+    // Protocol base fee, applied by each escrow to arbitered bets only (% of pot →
+    // revenueWallet). Arbitration itself is paid from bonds at the registry.
     address public immutable revenueWallet;
-    uint256 public immutable baseFeeBps; // base fee, % of pot → revenueWallet
-    uint256 public immutable executionFee; // fixed per-side deposit; loser's pays the arbiter
+    uint256 public immutable baseFeeBps;
 
     event BetCreated(
         address indexed escrow, address indexed yesAgent, address indexed noAgent, bytes32 termsHash, uint8 visibility
@@ -50,14 +53,12 @@ contract BetEscrowFactory {
         address pauseController_,
         address revenueWallet_,
         uint256 baseFeeBps_,
-        uint256 executionFee_,
         address registry_
     ) {
         allowlist = StablecoinAllowlist(allowlist_);
         pauseController = EmergencyPauseController(pauseController_);
         revenueWallet = revenueWallet_;
         baseFeeBps = baseFeeBps_;
-        executionFee = executionFee_;
         registry = IAgentRegistry(registry_);
     }
 
@@ -77,8 +78,20 @@ contract BetEscrowFactory {
         if (gated && address(registry) != address(0) && !registry.isActive(msg.sender)) {
             revert NotRegistered();
         }
-        BetEscrow e = new BetEscrow(terms, baseFeeBps, executionFee, revenueWallet);
+        // Arbitered bets pay arbitration from bonds, so every named participant must
+        // be a registered, active agent (the open side, if any, is checked when a
+        // taker accepts).
+        if (terms.arbiter != address(0) && address(registry) != address(0)) {
+            if (terms.yesAgent != address(0) && !registry.isActive(terms.yesAgent)) revert NotRegistered();
+            if (terms.noAgent != address(0) && !registry.isActive(terms.noAgent)) revert NotRegistered();
+        }
+        BetEscrow e = new BetEscrow(terms, baseFeeBps, revenueWallet, address(registry));
         escrow = address(e);
+        // Onboard arbitered escrows: authorize the escrow to charge bonds and
+        // reserve each named participant's arbitration fee up front.
+        if (terms.arbiter != address(0) && address(registry) != address(0)) {
+            registry.onArbiteredBet(escrow, terms.yesAgent, terms.noAgent);
+        }
         // termsHash is derived inside the escrow from the descriptive terms.
         emit BetCreated(escrow, terms.yesAgent, terms.noAgent, e.termsHash(), terms.visibility);
     }

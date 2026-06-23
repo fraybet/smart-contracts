@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BetEscrow} from "../src/custom/BetEscrow.sol";
 
 contract MockUSDC is ERC20 {
@@ -14,6 +15,32 @@ contract MockUSDC is ERC20 {
 
     function decimals() public pure override returns (uint8) {
         return 6;
+    }
+}
+
+/// @notice Stand-in for the bond registry: tracks reservations and pays the
+///         arbiter out of its own USDC (the "bonds"). Tests fund it as needed.
+contract MockBondRegistry {
+    IERC20 public immutable token;
+    uint256 public arbitrationFee;
+    mapping(address => uint256) public reservedOf;
+
+    constructor(address token_, uint256 fee_) {
+        token = IERC20(token_);
+        arbitrationFee = fee_;
+    }
+
+    function reserveTaker(address taker) external {
+        reservedOf[taker] += arbitrationFee;
+    }
+
+    function release(address wallet) external {
+        if (reservedOf[wallet] >= arbitrationFee) reservedOf[wallet] -= arbitrationFee;
+    }
+
+    function charge(address wallet, address to, uint256 amount) external {
+        if (reservedOf[wallet] >= arbitrationFee) reservedOf[wallet] -= arbitrationFee;
+        if (amount > 0) token.transfer(to, amount);
     }
 }
 
@@ -32,6 +59,9 @@ contract BetEscrowTest is Test {
     uint64 challengeWindow = 1 hours;
     uint64 claimDeadline;
 
+    MockBondRegistry reg; // zero arbitration fee — for plain mechanics tests
+    MockBondRegistry feeReg; // arbitrationFee = EXEC_FEE — for fee tests, pre-funded
+
     function setUp() public {
         usdc = new MockUSDC();
         yes = makeAddr("yes");
@@ -40,6 +70,9 @@ contract BetEscrowTest is Test {
         stranger = makeAddr("stranger");
         revenue = makeAddr("revenue");
         claimDeadline = uint64(block.timestamp + 1 days);
+        reg = new MockBondRegistry(address(usdc), 0);
+        feeReg = new MockBondRegistry(address(usdc), EXEC_FEE);
+        usdc.mint(address(feeReg), 2 * EXEC_FEE); // both sides' bonds
     }
 
     function _deploy(uint256 yesStake, uint256 noStake, address arbiter) internal returns (BetEscrow e) {
@@ -61,8 +94,8 @@ contract BetEscrowTest is Test {
                 visibility: 1
             }),
             0,
-            0,
-            revenue
+            revenue,
+            address(reg)
         );
         usdc.mint(yes, yesStake);
         usdc.mint(no, noStake);
@@ -72,8 +105,8 @@ contract BetEscrowTest is Test {
         usdc.approve(address(e), noStake);
     }
 
-    // Deploy an arbitered bet with protocol fees, and fund both sides (each pays
-    // stake + the execution-fee deposit).
+    // Deploy an arbitered bet with the protocol base fee, and fund both sides
+    // (stake only — arbitration is bonded at feeReg, which holds both bonds).
     function _deployFeesFunded() internal returns (BetEscrow e) {
         e = new BetEscrow(
             BetEscrow.Terms({
@@ -93,15 +126,19 @@ contract BetEscrowTest is Test {
                 visibility: 1
             }),
             BASE_FEE_BPS,
-            EXEC_FEE,
-            revenue
+            revenue,
+            address(feeReg)
         );
-        usdc.mint(yes, YES_STAKE + EXEC_FEE);
-        usdc.mint(no, NO_STAKE + EXEC_FEE);
+        // Both sides are committed in the bet, so reserve their bonds (the factory
+        // does this via onArbiteredBet in production).
+        feeReg.reserveTaker(yes);
+        feeReg.reserveTaker(no);
+        usdc.mint(yes, YES_STAKE);
+        usdc.mint(no, NO_STAKE);
         vm.prank(yes);
-        usdc.approve(address(e), YES_STAKE + EXEC_FEE);
+        usdc.approve(address(e), YES_STAKE);
         vm.prank(no);
-        usdc.approve(address(e), NO_STAKE + EXEC_FEE);
+        usdc.approve(address(e), NO_STAKE);
         vm.prank(yes);
         e.fund();
         vm.prank(no);
@@ -187,11 +224,11 @@ contract BetEscrowTest is Test {
         assertEq(usdc.balanceOf(address(e)), 0);
     }
 
-    // --- arbitration fees (base % → revenue, fixed execution fee, loser pays) ---
+    // --- arbitration fees (base % of pot → revenue; arbitration paid from bonds) ---
 
-    function testFeeUndisputedRefundsDeposits() public {
-        BetEscrow e = _deployFeesFunded(); // escrow holds pot + 2*EXEC_FEE
-        assertEq(usdc.balanceOf(address(e)), YES_STAKE + NO_STAKE + 2 * EXEC_FEE);
+    function testFeeUndisputedReleasesBonds() public {
+        BetEscrow e = _deployFeesFunded(); // escrow holds only the pot (stakes)
+        assertEq(usdc.balanceOf(address(e)), YES_STAKE + NO_STAKE);
 
         vm.prank(yes);
         e.claim(BetEscrow.Outcome.Yes, bytes32(0));
@@ -201,13 +238,17 @@ contract BetEscrowTest is Test {
         uint256 pot = YES_STAKE + NO_STAKE;
         uint256 baseFee = pot * BASE_FEE_BPS / 10_000; // 0.1%
         assertEq(usdc.balanceOf(revenue), baseFee, "base fee to revenue");
-        assertEq(usdc.balanceOf(yes), pot - baseFee + EXEC_FEE, "winner: pot - baseFee + own deposit refund");
-        assertEq(usdc.balanceOf(no), EXEC_FEE, "loser deposit refunded (no arbitration happened)");
+        assertEq(usdc.balanceOf(yes), pot - baseFee, "winner takes pot minus base fee");
+        assertEq(usdc.balanceOf(no), 0, "loser of the bet gets nothing");
         assertEq(usdc.balanceOf(arb), 0, "arbiter unpaid when undisputed");
         assertEq(usdc.balanceOf(address(e)), 0);
+        // Bonds untouched (both reservations released, nothing charged).
+        assertEq(usdc.balanceOf(address(feeReg)), 2 * EXEC_FEE, "bonds intact");
+        assertEq(feeReg.reservedOf(yes), 0, "yes reservation released");
+        assertEq(feeReg.reservedOf(no), 0, "no reservation released");
     }
 
-    function testFeeDisputedLoserPaysArbiter() public {
+    function testFeeDisputedLoserBondPaysArbiter() public {
         BetEscrow e = _deployFeesFunded();
         vm.prank(yes);
         e.claim(BetEscrow.Outcome.Yes, bytes32(0));
@@ -219,16 +260,17 @@ contract BetEscrowTest is Test {
         uint256 pot = YES_STAKE + NO_STAKE;
         uint256 baseFee = pot * BASE_FEE_BPS / 10_000;
         assertEq(usdc.balanceOf(revenue), baseFee, "base fee to revenue");
-        assertEq(usdc.balanceOf(arb), EXEC_FEE, "arbiter paid by the loser's deposit");
-        assertEq(usdc.balanceOf(no), pot - baseFee + EXEC_FEE, "winner whole minus base fee, deposit refunded");
-        assertEq(usdc.balanceOf(yes), 0, "loser forfeits stake + execution-fee deposit");
+        assertEq(usdc.balanceOf(arb), EXEC_FEE, "arbiter paid from the loser's bond");
+        assertEq(usdc.balanceOf(no), pot - baseFee, "winner takes pot minus base fee");
+        assertEq(usdc.balanceOf(yes), 0, "loser forfeits the bet (and its bond pays the arbiter)");
         assertEq(usdc.balanceOf(address(e)), 0);
+        assertEq(usdc.balanceOf(address(feeReg)), EXEC_FEE, "loser's bond drained to arbiter");
     }
 
-    function testFeeDisputedVoidSplitsFeesEqually() public {
+    function testFeeDisputedVoidSplitsBondsEqually() public {
         // Arbiter rules a contested bet VOID (e.g. nonsensical). It still did the
-        // work, so base fee + execution fee are charged, split equally; the rest
-        // is refunded. No loser eats the whole deposit.
+        // work, so the base fee (from the pot) + the arbitration fee (from bonds)
+        // are charged, each split equally; the rest is refunded.
         BetEscrow e = _deployFeesFunded();
         vm.prank(yes);
         e.claim(BetEscrow.Outcome.Yes, bytes32(0));
@@ -239,24 +281,25 @@ contract BetEscrowTest is Test {
 
         uint256 pot = YES_STAKE + NO_STAKE;
         uint256 baseFee = pot * BASE_FEE_BPS / 10_000;
-        uint256 totalFee = baseFee + EXEC_FEE;
-        uint256 yesShare = totalFee / 2;
-        uint256 noShare = totalFee - yesShare;
+        uint256 yesBase = baseFee / 2;
+        uint256 noBase = baseFee - yesBase;
         assertEq(usdc.balanceOf(revenue), baseFee, "base fee to revenue");
-        assertEq(usdc.balanceOf(arb), EXEC_FEE, "arbiter paid for the ruling");
-        assertEq(usdc.balanceOf(yes), YES_STAKE + EXEC_FEE - yesShare, "yes refunded minus its half of fees");
-        assertEq(usdc.balanceOf(no), NO_STAKE + EXEC_FEE - noShare, "no refunded minus its half of fees");
-        assertEq(usdc.balanceOf(address(e)), 0, "escrow fully drained");
+        assertEq(usdc.balanceOf(arb), EXEC_FEE, "arbiter paid the full fee, half from each bond");
+        assertEq(usdc.balanceOf(yes), YES_STAKE - yesBase, "yes stake refunded minus its base-fee half");
+        assertEq(usdc.balanceOf(no), NO_STAKE - noBase, "no stake refunded minus its base-fee half");
+        assertEq(usdc.balanceOf(address(e)), 0, "escrow (stakes) fully drained");
+        assertEq(usdc.balanceOf(address(feeReg)), EXEC_FEE, "half of each bond went to the arbiter");
     }
 
-    function testFeeVoidRefundsEverything() public {
+    function testFeeVoidRefundsStakesAndBonds() public {
         BetEscrow e = _deployFeesFunded();
         vm.warp(claimDeadline + 1);
         e.voidUnclaimed();
-        assertEq(usdc.balanceOf(yes), YES_STAKE + EXEC_FEE, "stake + deposit refunded");
-        assertEq(usdc.balanceOf(no), NO_STAKE + EXEC_FEE);
-        assertEq(usdc.balanceOf(revenue), 0, "no fee on void");
+        assertEq(usdc.balanceOf(yes), YES_STAKE, "stake refunded");
+        assertEq(usdc.balanceOf(no), NO_STAKE);
+        assertEq(usdc.balanceOf(revenue), 0, "no fee on an undisputed void");
         assertEq(usdc.balanceOf(address(e)), 0);
+        assertEq(usdc.balanceOf(address(feeReg)), 2 * EXEC_FEE, "bonds intact");
     }
 
     // --- fast-settle (mutual agreement) ---
@@ -361,8 +404,8 @@ contract BetEscrowTest is Test {
                 yes, yes, arb, address(usdc), 1, 1, uint64(block.timestamp), claimDeadline, challengeWindow, 0, "x", "s", "", 0
             ),
             0,
-            0,
-            revenue
+            revenue,
+            address(0)
         ); // same agents
     }
 
@@ -370,6 +413,7 @@ contract BetEscrowTest is Test {
 
     function _deployOpen(address arbiter_) internal returns (BetEscrow e) {
         // yes is the proposer; the NO side is open (address(0)).
+        bool arbitered = arbiter_ != address(0);
         e = new BetEscrow(
             BetEscrow.Terms({
                 yesAgent: yes,
@@ -387,10 +431,12 @@ contract BetEscrowTest is Test {
                 fallbackSource: "",
                 visibility: 1
             }),
-            arbiter_ == address(0) ? 0 : BASE_FEE_BPS,
-            arbiter_ == address(0) ? 0 : EXEC_FEE,
-            revenue
+            arbitered ? BASE_FEE_BPS : 0,
+            revenue,
+            arbitered ? address(feeReg) : address(0)
         );
+        // The factory reserves the proposer's bond at creation; do the same here.
+        if (arbitered) feeReg.reserveTaker(yes);
     }
 
     function _fundProposer(BetEscrow e, uint256 amount) internal {
@@ -421,12 +467,16 @@ contract BetEscrowTest is Test {
         assertEq(uint8(e.status()), uint8(BetEscrow.Status.Live));
     }
 
-    function testOpenBetArbiteredAcceptDeposits() public {
+    function testOpenBetArbiteredAcceptStakeOnly() public {
         BetEscrow e = _deployOpen(arb);
-        _fundProposer(e, YES_STAKE + EXEC_FEE);
-        _accept(e, NO_STAKE + EXEC_FEE);
+        _fundProposer(e, YES_STAKE);
+        _accept(e, NO_STAKE);
         assertEq(uint8(e.status()), uint8(BetEscrow.Status.Live));
-        assertEq(usdc.balanceOf(address(e)), YES_STAKE + NO_STAKE + 2 * EXEC_FEE);
+        // Escrow holds only stakes; bonds (incl. the taker's, reserved on accept)
+        // live at the registry.
+        assertEq(usdc.balanceOf(address(e)), YES_STAKE + NO_STAKE);
+        assertEq(feeReg.reservedOf(yes), EXEC_FEE, "proposer bond reserved");
+        assertEq(feeReg.reservedOf(no), EXEC_FEE, "taker bond reserved on accept");
     }
 
     function testRevokeRefundsProposer() public {
@@ -497,8 +547,8 @@ contract BetEscrowTest is Test {
                 0
             ),
             0,
-            0,
-            revenue
+            revenue,
+            address(0)
         );
     }
 
