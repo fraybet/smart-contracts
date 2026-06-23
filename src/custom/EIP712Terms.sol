@@ -17,7 +17,7 @@ library EIP712Terms {
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     bytes32 internal constant BET_TERMS_TYPEHASH = keccak256(
-        "BetTerms(address yesAgent,address noAgent,address collateralToken,uint256 yesStake,uint256 noStake,string statement,uint256 eventTime,uint256 claimDeadline,uint256 challengeWindow,string primarySource,string fallbackSource,address arbiter,uint256 nonce)"
+        "BetTerms(address yesAgent,address noAgent,address collateralToken,uint256 yesStake,uint256 noStake,string statement,uint256 eventTime,uint256 claimDeadline,uint256 challengeWindow,string primarySource,string fallbackSource,address arbiter,uint256 nonce,uint8 visibility)"
     );
 
     struct BetTerms {
@@ -34,28 +34,33 @@ library EIP712Terms {
         string fallbackSource;
         address arbiter;
         uint256 nonce;
+        uint8 visibility;
     }
 
-    /// @notice EIP-712 hashStruct(BetTerms) — the canonical termsHash.
+    /// @notice EIP-712 hashStruct(BetTerms) — the canonical termsHash. The encode
+    ///         is split in two and concatenated (identical bytes to a single
+    ///         abi.encode of all fields) to keep the stack shallow.
     function structHash(BetTerms memory t) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                BET_TERMS_TYPEHASH,
-                t.yesAgent,
-                t.noAgent,
-                t.collateralToken,
-                t.yesStake,
-                t.noStake,
-                keccak256(bytes(t.statement)),
-                t.eventTime,
-                t.claimDeadline,
-                t.challengeWindow,
-                keccak256(bytes(t.primarySource)),
-                keccak256(bytes(t.fallbackSource)),
-                t.arbiter,
-                t.nonce
-            )
+        bytes memory head = abi.encode(
+            BET_TERMS_TYPEHASH,
+            t.yesAgent,
+            t.noAgent,
+            t.collateralToken,
+            t.yesStake,
+            t.noStake,
+            keccak256(bytes(t.statement)),
+            t.eventTime
         );
+        bytes memory tail = abi.encode(
+            t.claimDeadline,
+            t.challengeWindow,
+            keccak256(bytes(t.primarySource)),
+            keccak256(bytes(t.fallbackSource)),
+            t.arbiter,
+            t.nonce,
+            t.visibility
+        );
+        return keccak256(bytes.concat(head, tail));
     }
 
     /// @notice EIP-712 domain separator.

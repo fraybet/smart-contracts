@@ -41,12 +41,18 @@ contract BetEscrowFactory {
     uint256 public immutable baseFeeBps;
 
     event BetCreated(
-        address indexed escrow, address indexed yesAgent, address indexed noAgent, bytes32 termsHash, uint8 visibility
+        address indexed escrow,
+        address indexed creator,
+        address indexed yesAgent,
+        address noAgent,
+        bytes32 termsHash,
+        uint8 visibility
     );
 
     error ProtocolPaused();
     error TokenNotAllowed();
     error NotRegistered();
+    error NotParticipant();
 
     constructor(
         address allowlist_,
@@ -67,11 +73,32 @@ contract BetEscrowFactory {
     ///         be a registered, active agent. BetEscrow validates the terms and
     ///         restricts funding/claims to the named participants.
     function create(BetEscrow.Terms calldata terms) external returns (address escrow) {
+        _gate(terms);
+        BetEscrow e = new BetEscrow(terms, baseFeeBps, revenueWallet, address(registry));
+        escrow = address(e);
+        bytes32 th = e.termsHash(); // derived inside the escrow from the descriptive terms
+        // Onboard arbitered escrows: authorize the escrow to charge bonds and
+        // reserve each named participant's arbitration fee up front.
+        if (terms.arbiter != address(0) && address(registry) != address(0)) {
+            registry.onArbiteredBet(escrow, terms.yesAgent, terms.noAgent);
+        }
+        emit BetCreated(escrow, msg.sender, terms.yesAgent, terms.noAgent, th, terms.visibility);
+    }
+
+    /// @dev Pre-deploy checks: protocol controls, creator-is-participant, and
+    ///      registration gating. Split out of create() to keep its stack shallow.
+    function _gate(BetEscrow.Terms calldata terms) internal view {
         if (address(pauseController) != address(0) && pauseController.paused()) {
             revert ProtocolPaused();
         }
         if (address(allowlist) != address(0) && !allowlist.isAllowed(terms.token)) {
             revert TokenNotAllowed();
+        }
+        // The creator must be a participant — you can only post a bet you're in.
+        // This blocks naming arbitrary agents to spam the public feed / their
+        // reputation. (A relayed, both-signed order book is a separate future path.)
+        if (msg.sender != terms.yesAgent && msg.sender != terms.noAgent) {
+            revert NotParticipant();
         }
         // Gate public + arbitered bets on registration; private direct bets are open.
         bool gated = terms.visibility == 1 || terms.arbiter != address(0);
@@ -79,20 +106,10 @@ contract BetEscrowFactory {
             revert NotRegistered();
         }
         // Arbitered bets pay arbitration from bonds, so every named participant must
-        // be a registered, active agent (the open side, if any, is checked when a
-        // taker accepts).
+        // be a registered, active agent (the open side, if any, is checked on accept).
         if (terms.arbiter != address(0) && address(registry) != address(0)) {
             if (terms.yesAgent != address(0) && !registry.isActive(terms.yesAgent)) revert NotRegistered();
             if (terms.noAgent != address(0) && !registry.isActive(terms.noAgent)) revert NotRegistered();
         }
-        BetEscrow e = new BetEscrow(terms, baseFeeBps, revenueWallet, address(registry));
-        escrow = address(e);
-        // Onboard arbitered escrows: authorize the escrow to charge bonds and
-        // reserve each named participant's arbitration fee up front.
-        if (terms.arbiter != address(0) && address(registry) != address(0)) {
-            registry.onArbiteredBet(escrow, terms.yesAgent, terms.noAgent);
-        }
-        // termsHash is derived inside the escrow from the descriptive terms.
-        emit BetCreated(escrow, terms.yesAgent, terms.noAgent, e.termsHash(), terms.visibility);
     }
 }

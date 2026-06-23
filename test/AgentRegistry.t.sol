@@ -44,33 +44,34 @@ contract AgentRegistryTest is Test {
         store.setController(address(reg));
     }
 
-    function _register(address owner_, address w) internal {
-        usdc.mint(owner_, FEE + BOND);
-        vm.prank(owner_);
+    // A wallet self-registers (owner == wallet), as the registry now requires.
+    function _register(address w) internal {
+        usdc.mint(w, FEE + BOND);
+        vm.prank(w);
         usdc.approve(address(store), FEE + BOND); // storage is the funds custodian
-        vm.prank(owner_);
+        vm.prank(w);
         reg.register(w, w, keccak256("policy"), keccak256("meta"));
     }
 
     function testRegisterPullsFeeAndBond() public {
-        _register(principal, wallet);
+        _register(wallet);
         assertEq(usdc.balanceOf(address(store)), FEE + BOND, "funds held in storage");
         assertEq(store.accruedFees(), FEE);
         AgentStorage.Profile memory p = reg.agent(wallet);
-        assertEq(p.owner, principal);
+        assertEq(p.owner, wallet);
         assertEq(p.signer, wallet);
         assertEq(p.bond, BOND);
         assertTrue(p.active);
     }
 
     function testFundsInvariant() public {
-        _register(principal, wallet);
+        _register(wallet);
         // held == sum(bonds) + accruedFees
         assertEq(usdc.balanceOf(address(store)), store.bondOf(wallet) + store.accruedFees());
     }
 
     function testSweepFeesToRevenue() public {
-        _register(principal, wallet);
+        _register(wallet);
         reg.sweepFees(); // anyone may call; destination is fixed
         assertEq(usdc.balanceOf(revenue), FEE);
         assertEq(store.accruedFees(), 0);
@@ -78,15 +79,15 @@ contract AgentRegistryTest is Test {
     }
 
     function testDeactivateRefundsBond() public {
-        _register(principal, wallet);
-        vm.prank(principal);
+        _register(wallet);
+        vm.prank(wallet);
         reg.deactivate(wallet);
         assertFalse(reg.isActive(wallet));
-        assertEq(usdc.balanceOf(principal), BOND, "bond refunded to owner");
+        assertEq(usdc.balanceOf(wallet), BOND, "bond refunded to owner");
     }
 
     function testSlashMovesBondToRevenue() public {
-        _register(principal, wallet);
+        _register(wallet);
         reg.slash(wallet); // admin
         assertEq(store.accruedFees(), FEE + BOND);
         assertFalse(reg.isActive(wallet));
@@ -95,25 +96,25 @@ contract AgentRegistryTest is Test {
     }
 
     function testOnlyAdminSlashes() public {
-        _register(principal, wallet);
+        _register(wallet);
         vm.prank(other);
         vm.expectRevert(AgentRegistry.NotAdmin.selector);
         reg.slash(wallet);
     }
 
     function testRegisterRequiresApproval() public {
-        usdc.mint(principal, FEE + BOND); // minted but not approved
-        vm.prank(principal);
+        usdc.mint(wallet, FEE + BOND); // minted but not approved
+        vm.prank(wallet);
         vm.expectRevert();
         reg.register(wallet, signer, bytes32(0), bytes32(0));
     }
 
     function testCannotRegisterTwice() public {
-        _register(principal, wallet);
-        usdc.mint(principal, FEE + BOND);
-        vm.prank(principal);
+        _register(wallet);
+        usdc.mint(wallet, FEE + BOND);
+        vm.prank(wallet);
         usdc.approve(address(store), FEE + BOND);
-        vm.prank(principal);
+        vm.prank(wallet);
         vm.expectRevert(AgentRegistry.AlreadyRegistered.selector);
         reg.register(wallet, signer, bytes32(0), bytes32(0));
     }
@@ -134,8 +135,8 @@ contract AgentRegistryTest is Test {
     address constant ESCROW = address(0xE5C0);
 
     function _onboardArbiteredBet() internal {
-        _register(principal, wallet);
-        _register(other, wallet2);
+        _register(wallet);
+        _register(wallet2);
         reg.setFactory(address(this)); // act as the authorized factory
         reg.onArbiteredBet(ESCROW, wallet, wallet2); // authorizes ESCROW + reserves both
     }
@@ -147,7 +148,7 @@ contract AgentRegistryTest is Test {
     }
 
     function testReserveRevertsWithoutEnoughBond() public {
-        _register(principal, wallet);
+        _register(wallet);
         reg.setArbitrationFee(BOND + 1); // more than the bond
         reg.setFactory(address(this));
         vm.expectRevert(AgentRegistry.InsufficientBond.selector);
@@ -180,7 +181,7 @@ contract AgentRegistryTest is Test {
 
     function testDeactivateBlockedWhileReserved() public {
         _onboardArbiteredBet();
-        vm.prank(principal);
+        vm.prank(wallet);
         vm.expectRevert(AgentRegistry.BondReservedOpen.selector);
         reg.deactivate(wallet);
     }
@@ -188,7 +189,7 @@ contract AgentRegistryTest is Test {
     // --- upgradeability (UUPS): state in storage survives a logic swap ---
 
     function testUpgradePreservesState() public {
-        _register(principal, wallet);
+        _register(wallet);
         AgentRegistry newImpl = new AgentRegistry();
         reg.upgradeToAndCall(address(newImpl), ""); // admin authorized
         // Agent + config still intact (storage is separate; config in proxy slot).

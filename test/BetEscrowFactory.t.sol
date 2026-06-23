@@ -17,13 +17,18 @@ contract BetEscrowFactoryTest is Test {
     address arb;
 
     event BetCreated(
-        address indexed escrow, address indexed yesAgent, address indexed noAgent, bytes32 termsHash, uint8 visibility
+        address indexed escrow,
+        address indexed creator,
+        address indexed yesAgent,
+        address noAgent,
+        bytes32 termsHash,
+        uint8 visibility
     );
 
     function setUp() public {
         factory = new BetEscrowFactory(address(0), address(0), address(0xBEEF), 0, address(0)); // controls disabled
         usdc = new MockUSDC();
-        yes = makeAddr("yes");
+        yes = address(this); // the test contract is the creator → a participant
         no = makeAddr("no");
         arb = makeAddr("arb");
     }
@@ -88,7 +93,8 @@ contract BetEscrowFactoryTest is Test {
                 primarySource: t.primarySource,
                 fallbackSource: t.fallbackSource,
                 arbiter: t.arbiter,
-                nonce: t.nonce
+                nonce: t.nonce,
+                visibility: t.visibility
             })
         );
     }
@@ -96,7 +102,7 @@ contract BetEscrowFactoryTest is Test {
     function testCreateEmitsAndDeploys() public {
         // Escrow address isn't known ahead of time → skip matching topic1.
         vm.expectEmit(false, true, true, true);
-        emit BetCreated(address(0), yes, no, _expectedHash(), 1);
+        emit BetCreated(address(0), address(this), yes, no, _expectedHash(), 1);
         address escrow = factory.create(_terms());
 
         BetEscrow e = BetEscrow(escrow);

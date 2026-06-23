@@ -65,7 +65,8 @@ contract ParityTest is Test {
             primarySource: vm.parseJsonString(json, string.concat(base, ".terms.primarySource")),
             fallbackSource: vm.parseJsonString(json, string.concat(base, ".terms.fallbackSource")),
             arbiter: vm.parseJsonAddress(json, string.concat(base, ".terms.arbiter")),
-            nonce: vm.parseJsonUint(json, string.concat(base, ".terms.nonce"))
+            nonce: vm.parseJsonUint(json, string.concat(base, ".terms.nonce")),
+            visibility: uint8(vm.parseJsonUint(json, string.concat(base, ".terms.visibility")))
         });
 
         bytes32 wantTerms = vm.parseJsonBytes32(json, string.concat(base, ".termsHash"));

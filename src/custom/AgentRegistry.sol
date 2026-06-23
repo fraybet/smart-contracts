@@ -46,6 +46,7 @@ contract AgentRegistry is Initializable, UUPSUpgradeable {
     error AlreadyRegistered();
     error NotRegistered();
     error NotOwner();
+    error NotWallet();
     error NotAdmin();
     error NotFactory();
     error NotEscrow();
@@ -87,6 +88,10 @@ contract AgentRegistry is Initializable, UUPSUpgradeable {
     ///         AgentStorage (the funds custodian) for `registrationFee + bond`.
     function register(address wallet, address signer, bytes32 policyHash, bytes32 metadataHash) external {
         if (wallet == address(0) || signer == address(0)) revert ZeroAddress();
+        // The wallet must register ITSELF — otherwise anyone could squat a wallet
+        // address with a signer they control and later impersonate it. The wallet
+        // designates its own signer (which may be a separate signing key).
+        if (msg.sender != wallet) revert NotWallet();
         if (store.exists(wallet)) revert AlreadyRegistered();
 
         uint256 total = registrationFee + registrationBond;

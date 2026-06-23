@@ -212,7 +212,8 @@ contract BetEscrow is ReentrancyGuard {
                 primarySource: t.primarySource,
                 fallbackSource: t.fallbackSource,
                 arbiter: t.arbiter,
-                nonce: t.nonce
+                nonce: t.nonce,
+                visibility: t.visibility
             })
         );
         baseFeeBps = baseFeeBps_;
