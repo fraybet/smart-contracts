@@ -180,11 +180,12 @@ contract BetEscrowTest is Test {
         assertEq(uint8(e.status()), uint8(BetEscrow.Status.Contested));
 
         vm.prank(arb);
-        e.resolve(BetEscrow.Outcome.No, keccak256("verdict"));
+        e.resolve(BetEscrow.Outcome.No, keccak256("verdict"), "https://storage.googleapis.com/fray-arb/abc.pdf");
 
         assertEq(usdc.balanceOf(no), YES_STAKE + NO_STAKE);
         assertEq(usdc.balanceOf(yes), 0);
         assertEq(usdc.balanceOf(address(e)), 0);
+        assertEq(e.evidenceURI(), "https://storage.googleapis.com/fray-arb/abc.pdf", "arbiter evidence link stored on the bet");
     }
 
     function testVoidRefundOnTimeout() public {
@@ -218,7 +219,7 @@ contract BetEscrowTest is Test {
         vm.prank(no);
         e.challenge();
         vm.prank(arb);
-        e.resolve(BetEscrow.Outcome.Void, bytes32(0));
+        e.resolve(BetEscrow.Outcome.Void, bytes32(0), "");
         assertEq(usdc.balanceOf(yes), YES_STAKE);
         assertEq(usdc.balanceOf(no), NO_STAKE);
         assertEq(usdc.balanceOf(address(e)), 0);
@@ -255,7 +256,7 @@ contract BetEscrowTest is Test {
         vm.prank(no);
         e.challenge();
         vm.prank(arb);
-        e.resolve(BetEscrow.Outcome.No, bytes32(0)); // NO wins; yes is the loser
+        e.resolve(BetEscrow.Outcome.No, bytes32(0), ""); // NO wins; yes is the loser
 
         uint256 pot = YES_STAKE + NO_STAKE;
         uint256 baseFee = pot * BASE_FEE_BPS / 10_000;
@@ -277,7 +278,7 @@ contract BetEscrowTest is Test {
         vm.prank(no);
         e.challenge();
         vm.prank(arb);
-        e.resolve(BetEscrow.Outcome.Void, bytes32(0));
+        e.resolve(BetEscrow.Outcome.Void, bytes32(0), "");
 
         uint256 pot = YES_STAKE + NO_STAKE;
         uint256 baseFee = pot * BASE_FEE_BPS / 10_000;
@@ -384,7 +385,7 @@ contract BetEscrowTest is Test {
         e.challenge();
         vm.prank(stranger);
         vm.expectRevert(BetEscrow.NotArbiter.selector);
-        e.resolve(BetEscrow.Outcome.No, bytes32(0));
+        e.resolve(BetEscrow.Outcome.No, bytes32(0), "");
     }
 
     function testChallengeNeedsArbiter() public {
@@ -580,7 +581,7 @@ contract BetEscrowTest is Test {
         vm.prank(no);
         e.challenge();
         vm.prank(arb);
-        e.resolve(o, bytes32(0));
+        e.resolve(o, bytes32(0), "");
 
         // Every token funded is paid out to a participant; none created or stuck.
         uint256 paid = usdc.balanceOf(yes) + usdc.balanceOf(no);

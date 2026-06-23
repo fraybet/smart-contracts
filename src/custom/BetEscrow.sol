@@ -105,6 +105,10 @@ contract BetEscrow is ReentrancyGuard {
     string public primarySource;
     string public fallbackSource;
 
+    // The arbiter's published deliberation (a link to the full Claude/OpenAI/Gemini
+    // transcript PDF), set on resolve() so the resolution's evidence lives on the bet.
+    string public evidenceURI;
+
     // Protocol fees — applied ONLY to arbitered bets (arbiter != 0). baseFee is a
     // % of the pot → revenueWallet, taken at settlement. Arbitration itself is paid
     // from the participants' registration BONDS (not a per-bet deposit): the
@@ -136,6 +140,9 @@ contract BetEscrow is ReentrancyGuard {
     event Challenged(address indexed by);
     event OutcomeAgreed(address indexed by, Outcome outcome);
     event Settled(Outcome outcome);
+    // Emitted when the arbiter resolves a dispute, carrying the link to its
+    // published deliberation so indexers/clients can attach it to the bet.
+    event ArbiterResolved(Outcome outcome, bytes32 evidenceHash, string evidenceURI);
 
     error NotParticipant();
     error NotFunding();
@@ -347,16 +354,20 @@ contract BetEscrow is ReentrancyGuard {
         emit Challenged(msg.sender);
     }
 
-    /// @notice Arbiter resolves a contested bet to YES, NO, or VOID.
-    function resolve(Outcome outcome, bytes32 evidenceHash) external nonReentrant {
+    /// @notice Arbiter resolves a contested bet to YES, NO, or VOID. evidenceURI_
+    ///         is the link to the arbiter's published deliberation (the full
+    ///         Claude/OpenAI/Gemini transcript PDF); evidenceHash commits to it.
+    function resolve(Outcome outcome, bytes32 evidenceHash, string calldata evidenceURI_) external nonReentrant {
         if (status != Status.Contested) revert NotContested();
         if (msg.sender != arbiter) revert NotArbiter();
         if (outcome != Outcome.Yes && outcome != Outcome.No && outcome != Outcome.Void) {
             revert InvalidOutcome();
         }
+        evidenceURI = evidenceURI_;
         finalOutcome = outcome;
         status = outcome == Outcome.Void ? Status.Voided : Status.Resolved;
         emit Claimed(arbiter, outcome, evidenceHash, 0);
+        emit ArbiterResolved(outcome, evidenceHash, evidenceURI_);
         _settle();
     }
 
