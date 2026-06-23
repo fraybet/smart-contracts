@@ -119,6 +119,18 @@ contract AgentRegistryTest is Test {
         reg.register(wallet, signer, bytes32(0), bytes32(0));
     }
 
+    // Security #3: you can't register a wallet you don't control (squatting).
+    function testCannotRegisterAnotherWallet() public {
+        address victim = makeAddr("victim");
+        address attacker = makeAddr("attacker");
+        usdc.mint(attacker, FEE + BOND);
+        vm.prank(attacker);
+        usdc.approve(address(store), FEE + BOND);
+        vm.prank(attacker);
+        vm.expectRevert(AgentRegistry.NotWallet.selector);
+        reg.register(victim, attacker, keccak256("p"), keccak256("m")); // squat victim with attacker's signer
+    }
+
     function testStorageRejectsZero() public {
         vm.expectRevert(AgentStorage.ZeroAddress.selector);
         new AgentStorage(address(0), address(this));

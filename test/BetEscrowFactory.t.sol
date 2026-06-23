@@ -114,6 +114,25 @@ contract BetEscrowFactoryTest is Test {
         assertEq(uint8(e.status()), uint8(BetEscrow.Status.Funding));
     }
 
+    // Security #5: only a participant can create a bet (no naming arbitrary agents).
+    function testNonParticipantCannotCreate() public {
+        address stranger = makeAddr("stranger"); // not yesAgent (this) nor noAgent
+        vm.prank(stranger);
+        vm.expectRevert(BetEscrowFactory.NotParticipant.selector);
+        factory.create(_terms());
+    }
+
+    // Security #7: visibility is bound into termsHash — flipping it changes the hash.
+    function testVisibilityBoundIntoTermsHash() public {
+        BetEscrow.Terms memory pub = _terms();
+        pub.visibility = 1;
+        BetEscrow.Terms memory priv = _terms();
+        priv.visibility = 0;
+        bytes32 hPub = BetEscrow(factory.create(pub)).termsHash();
+        bytes32 hPriv = BetEscrow(factory.create(priv)).termsHash();
+        assertTrue(hPub != hPriv, "visibility must change the terms hash");
+    }
+
     function testCreatedEscrowFundsToLive() public {
         BetEscrow e = BetEscrow(factory.create(_terms()));
         usdc.mint(yes, 500e6);
