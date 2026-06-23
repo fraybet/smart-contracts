@@ -169,6 +169,18 @@ contract BetEscrowTest is Test {
         assertEq(usdc.balanceOf(address(e)), 0, "no funds left in escrow");
     }
 
+    function testClaimRejectedAfterDeadline() public {
+        BetEscrow e = _deploy(YES_STAKE, NO_STAKE, arb);
+        _fundBoth(e);
+        vm.warp(claimDeadline + 1); // past the claim window
+        vm.prank(yes);
+        vm.expectRevert(BetEscrow.ClaimDeadlinePassed.selector);
+        e.claim(BetEscrow.Outcome.Yes, bytes32(0));
+        // ...but the expired bet can still be voided with no penalty.
+        e.voidUnclaimed();
+        assertEq(uint8(e.status()), uint8(BetEscrow.Status.Voided));
+    }
+
     function testChallengeArbiterResolvesNo() public {
         BetEscrow e = _deploy(YES_STAKE, NO_STAKE, arb);
         _fundBoth(e);

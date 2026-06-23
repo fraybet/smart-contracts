@@ -157,6 +157,7 @@ contract BetEscrow is ReentrancyGuard {
     error ChallengeWindowClosed();
     error NotRefundable();
     error TooEarly();
+    error ClaimDeadlinePassed();
     error AlreadySettled();
     error BadTerms();
     error NotOpen();
@@ -302,6 +303,10 @@ contract BetEscrow is ReentrancyGuard {
     /// @notice Claim an outcome (YES or NO) once Live. Opens the challenge window.
     function claim(Outcome outcome, bytes32 evidenceHash) external {
         if (status != Status.Live) revert NotLive();
+        // Past the claim deadline the bet is no longer resolvable — it can only be
+        // voided (voidUnclaimed). Without this, a participant could sneak in a late
+        // claim before anyone calls voidUnclaimed.
+        if (block.timestamp >= claimDeadline) revert ClaimDeadlinePassed();
         if (outcome != Outcome.Yes && outcome != Outcome.No) revert InvalidOutcome();
         if (msg.sender != yesAgent && msg.sender != noAgent) revert NotParticipant();
         claimedOutcome = outcome;
