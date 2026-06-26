@@ -9,8 +9,9 @@ optimizer = true
 optimizer_runs = 200
 via_ir = false
 gas_reports = ["*"]
-# Read access to the shared Go<->Solidity parity vectors (test/Parity.t.sol).
-fs_permissions = [{access = "read", path = "test/testdata"}]
+# Read access to the shared Go<->Solidity parity vectors (test/Parity.t.sol);
+# write access for deploy scripts to record the address manifest.
+fs_permissions = [{access = "read", path = "test/testdata"}, {access = "read-write", path = "deployments"}]
 
 [profile.ci]
 fuzz = { runs = 1000 }
